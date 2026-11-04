@@ -60,16 +60,44 @@ LENGTH_OPTIONS = {
 }
 
 # Default model fallback order
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+
+# Known placeholder values to ignore
+DUMMY_KEYS = {
+    "your_gemini_api_key_here",
+    "your_actual_key_here",
+    "your_api_key_here",
+    "your_actual_gemini_api_key",
+}
 
 
 def get_api_key(override_key: Optional[str] = None) -> Optional[str]:
     """
-    Retrieve Gemini API key from explicit parameter or environment variables.
+    Retrieve Gemini API key with priority:
+    1. Direct override parameter (e.g. from user input in sidebar)
+    2. Streamlit secrets (st.secrets) for cloud deployments (Streamlit Cloud, HF Spaces)
+    3. OS environment variable (os.environ / .env via python-dotenv)
     """
     if override_key and override_key.strip():
-        return override_key.strip()
-    return os.getenv("GEMINI_API_KEY", "").strip() or None
+        key = override_key.strip()
+        if key not in DUMMY_KEYS:
+            return key
+
+    # Check Streamlit Cloud secrets if available
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
+            secret_val = str(st.secrets["GEMINI_API_KEY"]).strip()
+            if secret_val and secret_val not in DUMMY_KEYS:
+                return secret_val
+    except Exception:
+        pass
+
+    env_val = os.getenv("GEMINI_API_KEY", "").strip()
+    if env_val and env_val not in DUMMY_KEYS:
+        return env_val
+
+    return None
 
 
 def validate_inputs(
@@ -177,12 +205,10 @@ def _parse_story_response(raw_text: str, user_title: Optional[str] = None) -> Tu
     title_match = re.search(r"^(?:#+\s*(?:Title:\s*)?|\*\*Title:\s*\*\*\s*)([^\n]+)", text, re.IGNORECASE)
     if title_match:
         extracted_title = title_match.group(1).strip().strip('"*#')
-        # Remove the matched title line from the story body
         text = text[title_match.end():].strip()
     elif user_title and user_title.strip():
         extracted_title = user_title.strip()
     else:
-        # Fallback to first line if short enough
         lines = [line.strip() for line in text.split("\n") if line.strip()]
         if lines and len(lines[0]) < 80 and not lines[0].endswith("."):
             extracted_title = lines[0].strip("#* ")
@@ -209,8 +235,8 @@ def generate_story_with_google_genai(
     from google.genai import types
 
     client = genai.Client(api_key=api_key)
+    clean_model = model_name.replace("models/", "")
 
-    # Use client.models.generate_content
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
         temperature=0.85,
@@ -218,7 +244,7 @@ def generate_story_with_google_genai(
     )
 
     response = client.models.generate_content(
-        model=model_name,
+        model=clean_model,
         contents=user_prompt,
         config=config,
     )
@@ -256,6 +282,44 @@ def generate_story_with_legacy_genai(
         raise ValueError("Gemini API returned an empty response. Please try again.")
 
     return response.text
+
+
+def _get_dynamic_model_candidates(api_key: str, preferred_model: str) -> list:
+    """
+    Query Gemini API for accessible models for this API key,
+    or build a prioritized candidate fallback list.
+    """
+    candidates = [preferred_model]
+    for m in [
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-latest",
+        "models/gemini-1.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-pro",
+        "models/gemini-pro",
+        "gemini-pro",
+    ]:
+        if m not in candidates:
+            candidates.append(m)
+
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        online_models = [
+            m.name for m in genai.list_models()
+            if "generateContent" in getattr(m, "supported_generation_methods", [])
+        ]
+        if online_models:
+            for om in reversed(online_models):
+                clean_name = om.replace("models/", "")
+                if clean_name not in candidates:
+                    candidates.insert(0, clean_name)
+                if om not in candidates:
+                    candidates.insert(0, om)
+    except Exception:
+        pass
+
+    return candidates
 
 
 def generate_story(
@@ -303,8 +367,9 @@ def generate_story(
             "metadata": {},
         }
 
-    # 3. Model selection
-    active_model = model_name or DEFAULT_MODEL
+    # 3. Model selection & candidate fallback list
+    chosen_model = model_name or DEFAULT_MODEL
+    model_candidates = _get_dynamic_model_candidates(active_key, chosen_model)
 
     # 4. Prompt assembly
     system_prompt = build_system_prompt()
@@ -319,42 +384,56 @@ def generate_story(
         title=title,
     )
 
-    # 5. Call Gemini API with SDK detection (prefer modern google-genai)
+    # 5. Call Gemini API trying candidate models
     raw_response_text = ""
     sdk_used = "unknown"
-    error_msg = None
+    successful_model = chosen_model
+    last_exception = None
 
-    try:
+    def _call_gemini_single(model_to_use: str) -> Tuple[str, str]:
         try:
-            # Attempt modern Google GenAI SDK first
-            raw_response_text = generate_story_with_google_genai(
+            return generate_story_with_google_genai(
                 api_key=active_key,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                model_name=active_model,
-            )
-            sdk_used = "google-genai"
+                model_name=model_to_use,
+            ), "google-genai"
         except (ImportError, ModuleNotFoundError):
-            # Fall back to legacy google-generativeai
-            raw_response_text = generate_story_with_legacy_genai(
+            return generate_story_with_legacy_genai(
                 api_key=active_key,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                model_name=active_model,
-            )
-            sdk_used = "google-generativeai"
+                model_name=model_to_use,
+            ), "google-generativeai"
 
-    except Exception as exc:
-        exc_str = str(exc)
-        # Handle specific common failure cases cleanly
-        if "API_KEY_INVALID" in exc_str or "400" in exc_str and "key" in exc_str.lower():
-            error_msg = "Invalid Gemini API Key. Please verify your API key at https://aistudio.google.com/app/apikey"
+    # Iterate through model candidates until one succeeds
+    for candidate in model_candidates:
+        try:
+            raw_response_text, sdk_used = _call_gemini_single(candidate)
+            successful_model = candidate
+            last_exception = None
+            break
+        except Exception as exc:
+            last_exception = exc
+            err_str = str(exc)
+            if "API_KEY_INVALID" in err_str or "PERMISSION_DENIED" in err_str or "429" in err_str:
+                break
+            continue
+
+    if last_exception is not None and not raw_response_text:
+        exc_str = str(last_exception)
+        if "API_KEY_INVALID" in exc_str or ("400" in exc_str and "key" in exc_str.lower()):
+            error_msg = "Invalid Gemini API Key. Please verify your key at https://aistudio.google.com/app/apikey"
         elif "RESOURCE_EXHAUSTED" in exc_str or "429" in exc_str:
-            error_msg = "Gemini API rate limit exceeded or quota exhausted. Please wait a minute and try again."
+            error_msg = "Gemini API rate limit exceeded or quota exhausted. Please wait 60 seconds and try again."
         elif "PERMISSION_DENIED" in exc_str:
-            error_msg = "Permission denied. Check that the Gemini API is enabled for your project/key."
-        elif "MODEL_NOT_FOUND" in exc_str or "404" in exc_str:
-            error_msg = f"The model '{active_model}' was not found or is not supported by your API tier. Try switching to 'gemini-1.5-flash' in .env."
+            error_msg = "Permission denied. Ensure the Generative Language API is enabled for this key."
+        elif "MODEL_NOT_FOUND" in exc_str or "404" in exc_str or "not found" in exc_str.lower():
+            error_msg = (
+                "Your Gemini API key could not access the model. This happens if the key was created in Google Cloud "
+                "without 'Generative Language API' enabled. Please create a free key directly at: "
+                "https://aistudio.google.com/app/apikey and paste it into the Sidebar."
+            )
         else:
             error_msg = f"Story generation error: {exc_str}"
 
@@ -372,7 +451,6 @@ def generate_story(
     final_title, story_body = _parse_story_response(raw_response_text, user_title=title)
     words = story_body.split()
     word_count = len(words)
-    # Average adult reading speed: ~200-250 wpm
     reading_time_min = max(1, round(word_count / 225))
 
     return {
@@ -389,7 +467,7 @@ def generate_story(
             "length_choice": length_choice,
             "characters": characters.strip() if characters else "N/A",
             "setting": setting.strip() if setting else "N/A",
-            "model": active_model,
+            "model": successful_model,
             "sdk": sdk_used,
         },
     }
