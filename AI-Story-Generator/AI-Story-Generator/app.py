@@ -157,7 +157,7 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
 # -----------------------------------------------------------------------------
-# 2. Session State Initialization
+# 2. Session State Initialization & Callbacks
 # -----------------------------------------------------------------------------
 def init_session_state():
     """Initialize persistent session variables."""
@@ -166,13 +166,12 @@ def init_session_state():
     if "api_error" not in st.session_state:
         st.session_state.api_error = None
 
-    # Form input state tracking for reset capability
     default_values = {
         "title_input": "",
         "topic_input": "",
         "genre_input": GENRES[0],
         "mood_input": MOODS[0],
-        "audience_input": AUDIENCES[1],  # Teenagers
+        "audience_input": AUDIENCES[1],
         "characters_input": "",
         "setting_input": "",
         "length_input": "Medium (500–700 words)",
@@ -198,6 +197,30 @@ def clear_inputs():
     st.session_state.length_input = "Medium (500–700 words)"
     st.session_state.story_data = None
     st.session_state.api_error = None
+
+
+def load_scifi_prompt():
+    """Preload Sci-Fi prompt via on_click callback before widgets instantiate."""
+    st.session_state.title_input = "The Dyson Singularity"
+    st.session_state.topic_input = "A solitary maintenance engineer on a solar-harvesting Dyson ring discovers an anomalous encrypted audio broadcast coming from inside the core."
+    st.session_state.genre_input = "Science Fiction"
+    st.session_state.mood_input = "Suspenseful"
+    st.session_state.audience_input = "Adults"
+    st.session_state.characters_input = "Soren Vance (Chief Systems Engineer)"
+    st.session_state.setting_input = "Perimeter Station Aegis, orbit of Kepler-452"
+    st.session_state.length_input = "Medium (500–700 words)"
+
+
+def load_fantasy_prompt():
+    """Preload Fantasy prompt via on_click callback before widgets instantiate."""
+    st.session_state.title_input = "The Whispering Library"
+    st.session_state.topic_input = "An apprentice librarian finds a forbidden book whose pages rewrite themselves based on secrets murmured in the town square."
+    st.session_state.genre_input = "Fantasy"
+    st.session_state.mood_input = "Mysterious"
+    st.session_state.audience_input = "Teenagers"
+    st.session_state.characters_input = "Rowan (inquisitive apprentice), Master Bram"
+    st.session_state.setting_input = "The Grand Archives of Oakhaven"
+    st.session_state.length_input = "Medium (500–700 words)"
 
 
 # -----------------------------------------------------------------------------
@@ -281,20 +304,20 @@ with st.sidebar:
         has_env_key = bool(env_key)
 
         if has_env_key:
-            st.success("✅ Gemini API key detected from environment (.env)")
+            st.success("✅ Gemini API key detected (Active via Secrets/Env)")
         else:
-            st.warning("⚠️ No GEMINI_API_KEY detected in .env")
+            st.warning("⚠️ No GEMINI_API_KEY detected. Provide below or in secrets.")
 
         custom_api_key = st.text_input(
             "Override Gemini API Key",
             type="password",
             key="sidebar_api_key",
-            help="Optionally provide an API key for this session without modifying the .env file.",
+            help="Optionally provide an API key for this session without modifying configuration.",
         )
 
         selected_model = st.selectbox(
             "Gemini Model",
-            options=["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"],
+            options=["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"],
             index=0,
             help="Choose your preferred Gemini model version.",
         )
@@ -384,14 +407,10 @@ if st.session_state.story_data:
 
     col_tb1, col_tb2, col_tb3, col_tb4 = st.columns([1.2, 1.3, 1.2, 2.3])
     with col_tb1:
-        if st.button("🔄 Regenerate", use_container_width=True, help="Rerun with current inputs"):
-            execute_generation()
-            st.rerun()
+        st.button("🔄 Regenerate", on_click=execute_generation, use_container_width=True, help="Rerun with current inputs")
 
     with col_tb2:
-        if st.button("✨ Another Story", use_container_width=True, help="Start a new concept"):
-            clear_inputs()
-            st.rerun()
+        st.button("✨ Another Story", on_click=clear_inputs, use_container_width=True, help="Start a new concept")
 
     with col_tb3:
         # Prepare full story text file for download
@@ -436,7 +455,6 @@ Model: {meta.get('model')}
         unsafe_allow_html=True,
     )
 
-    # Render story paragraphs cleanly with markdown
     st.markdown(data["story"])
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -493,28 +511,18 @@ else:
     demo_col1, demo_col2 = st.columns(2)
 
     with demo_col1:
-        if st.button("🚀 Load Sci-Fi Prompt: The Dyson Singularity", use_container_width=True):
-            st.session_state.title_input = "The Dyson Singularity"
-            st.session_state.topic_input = "A solitary maintenance engineer on a solar-harvesting Dyson ring discovers an anomalous encrypted audio broadcast coming from inside the core."
-            st.session_state.genre_input = "Science Fiction"
-            st.session_state.mood_input = "Suspenseful"
-            st.session_state.audience_input = "Adults"
-            st.session_state.characters_input = "Soren Vance (Chief Systems Engineer)"
-            st.session_state.setting_input = "Perimeter Station Aegis, orbit of Kepler-452"
-            st.session_state.length_input = "Medium (500–700 words)"
-            st.rerun()
+        st.button(
+            "🚀 Load Sci-Fi Prompt: The Dyson Singularity",
+            on_click=load_scifi_prompt,
+            use_container_width=True,
+        )
 
     with demo_col2:
-        if st.button("🧙 Load Fantasy Prompt: The Whispering Library", use_container_width=True):
-            st.session_state.title_input = "The Whispering Library"
-            st.session_state.topic_input = "An apprentice librarian finds a forbidden book whose pages rewrite themselves based on secrets murmured in the town square."
-            st.session_state.genre_input = "Fantasy"
-            st.session_state.mood_input = "Mysterious"
-            st.session_state.audience_input = "Teenagers"
-            st.session_state.characters_input = "Rowan (inquisitive apprentice), Master Bram"
-            st.session_state.setting_input = "The Grand Archives of Oakhaven"
-            st.session_state.length_input = "Medium (500–700 words)"
-            st.rerun()
+        st.button(
+            "🧙 Load Fantasy Prompt: The Whispering Library",
+            on_click=load_fantasy_prompt,
+            use_container_width=True,
+        )
 
 
 # -----------------------------------------------------------------------------
