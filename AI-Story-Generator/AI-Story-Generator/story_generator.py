@@ -2,12 +2,12 @@
 story_generator.py
 ==================
 Core backend module for the AI Story Generator.
-Handles Gemini API client initialization, prompt engineering, narrative structuring,
-and robust error handling.
+Token-optimized with strict output limits and lean prompt engineering.
 """
 
 import os
 import re
+import time
 from typing import Dict, Any, Optional, Tuple
 from dotenv import load_dotenv
 
@@ -41,25 +41,29 @@ AUDIENCES = [
     "Adults",
 ]
 
+# Token budgets calibrated for story lengths (saving up to 80% output tokens)
 LENGTH_OPTIONS = {
     "Short (200–300 words)": {
         "min_words": 200,
         "max_words": 300,
-        "target_desc": "200 to 300 words (compact, fast-paced, high impact)",
+        "max_tokens": 550,
+        "target_desc": "200–300 words",
     },
     "Medium (500–700 words)": {
         "min_words": 500,
         "max_words": 700,
-        "target_desc": "500 to 700 words (well-developed characters, solid pacing)",
+        "max_tokens": 950,
+        "target_desc": "500–700 words",
     },
     "Long (1000–1200 words)": {
         "min_words": 1000,
         "max_words": 1200,
-        "target_desc": "1000 to 1200 words (rich atmosphere, immersive plot, detailed climax)",
+        "max_tokens": 1600,
+        "target_desc": "1000–1200 words",
     },
 }
 
-# Default model fallback order
+# Default model fallback
 DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 # Known placeholder values to ignore
@@ -72,18 +76,12 @@ DUMMY_KEYS = {
 
 
 def get_api_key(override_key: Optional[str] = None) -> Optional[str]:
-    """
-    Retrieve Gemini API key with priority:
-    1. Direct override parameter (e.g. from user input in sidebar)
-    2. Streamlit secrets (st.secrets) for cloud deployments (Streamlit Cloud, HF Spaces)
-    3. OS environment variable (os.environ / .env via python-dotenv)
-    """
+    """Retrieve Gemini API key with priority override, secrets, and env."""
     if override_key and override_key.strip():
         key = override_key.strip()
         if key not in DUMMY_KEYS:
             return key
 
-    # Check Streamlit Cloud secrets if available
     try:
         import streamlit as st
         if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
@@ -107,46 +105,29 @@ def validate_inputs(
     audience: str,
     length_choice: str,
 ) -> Tuple[bool, Optional[str]]:
-    """
-    Validate story input parameters before sending to LLM.
-    Returns (is_valid, error_message).
-    """
+    """Validate story input parameters before sending to LLM."""
     if not topic or not topic.strip():
-        return False, "Story topic/idea cannot be empty. Please provide a brief premise."
+        return False, "Story topic cannot be empty. Please provide a brief premise."
     if len(topic.strip()) < 5:
-        return False, "Story topic is too short. Please provide at least a few descriptive words."
+        return False, "Story topic is too short. Please provide at least a few words."
     if genre not in GENRES:
-        return False, f"Invalid genre '{genre}'. Must be one of: {', '.join(GENRES)}"
+        return False, f"Invalid genre '{genre}'."
     if mood not in MOODS:
-        return False, f"Invalid mood '{mood}'. Must be one of: {', '.join(MOODS)}"
+        return False, f"Invalid mood '{mood}'."
     if audience not in AUDIENCES:
-        return False, f"Invalid audience '{audience}'. Must be one of: {', '.join(AUDIENCES)}"
+        return False, f"Invalid audience '{audience}'."
     if length_choice not in LENGTH_OPTIONS:
         return False, "Invalid story length selection."
     return True, None
 
 
 def build_system_prompt() -> str:
-    """
-    Construct the professional fiction writer system prompt.
-    """
+    """Concise, token-optimized system instruction."""
     return (
-        "You are an acclaimed, master fiction author and master narrative designer. "
-        "Your craft combines immersive sensory world-building, compelling character dynamics, "
-        "and seamless narrative pacing.\n\n"
-        "STORYTELLING PRINCIPLES:\n"
-        "1. Structure: Build the story across 5 distinct narrative phases:\n"
-        "   - I. Introduction (The Hook & World): Introduce the protagonist, setting, and initial status quo.\n"
-        "   - II. Character Development: Reveal internal/external stakes, distinct personalities, and core motives.\n"
-        "   - III. Conflict (The Inciting Incident & Obstacles): Introduce escalating friction and tension.\n"
-        "   - IV. Climax: Deliver the dramatic peak, critical decision, or pivotal turning point.\n"
-        "   - V. Resolution: Provide a satisfying, earned conclusion with lingering emotional resonance.\n"
-        "2. Style & Tone: Strictly respect the selected Genre, Mood, and Target Audience guidelines.\n"
-        "   - Children: Age-appropriate vocabulary, vivid imagination, warmth, zero inappropriate content.\n"
-        "   - Teenagers: Relatable angst/ambition, energetic pacing, vivid dialogue, personal identity stakes.\n"
-        "   - Adults: Nuanced themes, psychological depth, atmospheric subtext, layered relationships.\n"
-        "3. Length Constraint: You MUST strictly honor the target word count bounds. Avoid repetitive fluff or abrupt endings.\n"
-        "4. Output Format: Start directly with a captivating Title formatted as `# Title: <Your Title>`, followed by the story text."
+        "You are an acclaimed fiction writer. Write engaging, original stories structured in 5 phases: "
+        "Hook/Intro, Character motivations, Conflict, Climax, and Resolution. "
+        "Strictly honor the selected Genre, Mood, Audience, and Word Count. "
+        "Start directly with: # Title: <Your Title>, followed immediately by the narrative."
     )
 
 
@@ -160,48 +141,27 @@ def build_user_prompt(
     length_choice: str,
     title: Optional[str] = None,
 ) -> str:
-    """
-    Construct the dynamic user prompt with all inputs and story parameters.
-    """
+    """Concise, token-optimized user prompt."""
     length_info = LENGTH_OPTIONS.get(length_choice, LENGTH_OPTIONS["Medium (500–700 words)"])
-    chars = characters.strip() if characters and characters.strip() else "Create memorable characters fitting the plot"
-    loc = setting.strip() if setting and setting.strip() else "An evocative setting tailored to the story's theme"
-    title_instruction = (
-        f"Use this specific title: '{title.strip()}'."
-        if title and title.strip()
-        else "Create a creative, evocative title that fits the story."
+    chars = characters.strip() if characters and characters.strip() else "Compelling characters"
+    loc = setting.strip() if setting and setting.strip() else "Immersive setting"
+    title_instruction = f"Title must be '{title.strip()}'." if title and title.strip() else "Invent a creative title."
+
+    return (
+        f"Topic: {topic.strip()}\n"
+        f"Genre: {genre} | Mood: {mood} | Audience: {audience}\n"
+        f"Characters: {chars} | Setting: {loc}\n"
+        f"Target Length: {length_info['target_desc']} (max {length_info['max_words']} words).\n"
+        f"{title_instruction}\n\n"
+        "Write the story now without introductory commentary."
     )
-
-    prompt = f"""Write an original, highly engaging story based on the following specifications:
-
-- **Topic / Premise:** {topic.strip()}
-- **Title Instruction:** {title_instruction}
-- **Genre:** {genre}
-- **Mood / Atmosphere:** {mood}
-- **Target Audience:** {audience}
-- **Main Characters:** {chars}
-- **Setting / Location:** {loc}
-- **Length Constraint:** Exactly {length_info['target_desc']} (Target: {length_info['min_words']} - {length_info['max_words']} words).
-
-Guidelines:
-1. Ensure a clear five-part arc: Introduction -> Character Development -> Conflict -> Climax -> Resolution.
-2. Use dialogue to show personality rather than just telling.
-3. Keep the language natural, immersive, and grammatically impeccable.
-4. Begin your response with:
-   # Title: <Story Title>
-   (followed by the narrative without markdown meta-announcements).
-"""
-    return prompt
 
 
 def _parse_story_response(raw_text: str, user_title: Optional[str] = None) -> Tuple[str, str]:
-    """
-    Extract the title and story body from the raw LLM response.
-    """
+    """Extract clean title and narrative body."""
     text = raw_text.strip()
     extracted_title = ""
 
-    # Look for '# Title: ...' or '# ...' at the very beginning
     title_match = re.search(r"^(?:#+\s*(?:Title:\s*)?|\*\*Title:\s*\*\*\s*)([^\n]+)", text, re.IGNORECASE)
     if title_match:
         extracted_title = title_match.group(1).strip().strip('"*#')
@@ -216,9 +176,7 @@ def _parse_story_response(raw_text: str, user_title: Optional[str] = None) -> Tu
         else:
             extracted_title = "Untitled Masterpiece"
 
-    # Clean up double title tags if LLM repeated it
     text = re.sub(r"^(?:Title:\s*|#+\s*)[^\n]+\n+", "", text, flags=re.IGNORECASE).strip()
-
     return extracted_title, text
 
 
@@ -227,10 +185,9 @@ def generate_story_with_google_genai(
     system_prompt: str,
     user_prompt: str,
     model_name: str,
+    max_output_tokens: int = 950,
 ) -> str:
-    """
-    Invoke Gemini using the modern `google-genai` SDK (`from google import genai`).
-    """
+    """Invoke Gemini using modern google-genai SDK with strict token budget."""
     from google import genai
     from google.genai import types
 
@@ -241,6 +198,7 @@ def generate_story_with_google_genai(
         system_instruction=system_prompt,
         temperature=0.85,
         top_p=0.95,
+        max_output_tokens=max_output_tokens,
     )
 
     response = client.models.generate_content(
@@ -260,10 +218,9 @@ def generate_story_with_legacy_genai(
     system_prompt: str,
     user_prompt: str,
     model_name: str,
+    max_output_tokens: int = 950,
 ) -> str:
-    """
-    Fallback invocation using `google.generativeai` SDK.
-    """
+    """Fallback invocation using google.generativeai SDK with strict token budget."""
     import google.generativeai as genai
 
     genai.configure(api_key=api_key)
@@ -274,6 +231,7 @@ def generate_story_with_legacy_genai(
         generation_config={
             "temperature": 0.85,
             "top_p": 0.95,
+            "max_output_tokens": max_output_tokens,
         },
     )
 
@@ -284,41 +242,12 @@ def generate_story_with_legacy_genai(
     return response.text
 
 
-def _get_dynamic_model_candidates(api_key: str, preferred_model: str) -> list:
-    """
-    Query Gemini API for accessible models for this API key,
-    or build a prioritized candidate fallback list.
-    """
+def _get_dynamic_model_candidates(preferred_model: str) -> list:
+    """Build a clean, token-efficient model fallback list."""
     candidates = [preferred_model]
-    for m in [
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-latest",
-        "models/gemini-1.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-pro",
-        "models/gemini-pro",
-        "gemini-pro",
-    ]:
+    for m in ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash"]:
         if m not in candidates:
             candidates.append(m)
-
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        online_models = [
-            m.name for m in genai.list_models()
-            if "generateContent" in getattr(m, "supported_generation_methods", [])
-        ]
-        if online_models:
-            for om in reversed(online_models):
-                clean_name = om.replace("models/", "")
-                if clean_name not in candidates:
-                    candidates.insert(0, clean_name)
-                if om not in candidates:
-                    candidates.insert(0, om)
-    except Exception:
-        pass
-
     return candidates
 
 
@@ -334,10 +263,7 @@ def generate_story(
     api_key: Optional[str] = None,
     model_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Main entry point for generating a story.
-    Returns a structured dictionary with success status, story text, metrics, and metadata.
-    """
+    """Main entry point for generating a story with token controls."""
     # 1. Validate inputs
     is_valid, validation_err = validate_inputs(topic, genre, mood, audience, length_choice)
     if not is_valid:
@@ -358,7 +284,7 @@ def generate_story(
             "success": False,
             "error": (
                 "Gemini API Key is missing. Please set `GEMINI_API_KEY` in your `.env` "
-                "file or enter it in the sidebar settings."
+                "or enter it in the sidebar settings."
             ),
             "story": "",
             "title": "",
@@ -369,9 +295,13 @@ def generate_story(
 
     # 3. Model selection & candidate fallback list
     chosen_model = model_name or DEFAULT_MODEL
-    model_candidates = _get_dynamic_model_candidates(active_key, chosen_model)
+    model_candidates = _get_dynamic_model_candidates(chosen_model)
 
-    # 4. Prompt assembly
+    # 4. Token limit calculation
+    length_info = LENGTH_OPTIONS.get(length_choice, LENGTH_OPTIONS["Medium (500–700 words)"])
+    max_tokens_budget = length_info.get("max_tokens", 950)
+
+    # 5. Prompt assembly
     system_prompt = build_system_prompt()
     user_prompt = build_user_prompt(
         topic=topic,
@@ -384,7 +314,7 @@ def generate_story(
         title=title,
     )
 
-    # 5. Call Gemini API trying candidate models
+    # 6. Call Gemini API
     raw_response_text = ""
     sdk_used = "unknown"
     successful_model = chosen_model
@@ -397,6 +327,7 @@ def generate_story(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 model_name=model_to_use,
+                max_output_tokens=max_tokens_budget,
             ), "google-genai"
         except (ImportError, ModuleNotFoundError):
             return generate_story_with_legacy_genai(
@@ -404,34 +335,45 @@ def generate_story(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 model_name=model_to_use,
+                max_output_tokens=max_tokens_budget,
             ), "google-generativeai"
 
-    # Iterate through model candidates until one succeeds
     for candidate in model_candidates:
-        try:
-            raw_response_text, sdk_used = _call_gemini_single(candidate)
-            successful_model = candidate
-            last_exception = None
-            break
-        except Exception as exc:
-            last_exception = exc
-            err_str = str(exc)
-            if "API_KEY_INVALID" in err_str or "PERMISSION_DENIED" in err_str or "429" in err_str:
+        for attempt in range(2):
+            try:
+                raw_response_text, sdk_used = _call_gemini_single(candidate)
+                successful_model = candidate
+                last_exception = None
                 break
-            continue
+            except Exception as exc:
+                last_exception = exc
+                err_str = str(exc)
+                if ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str) and attempt == 0:
+                    time.sleep(2)
+                    continue
+                if "API_KEY_INVALID" in err_str or "PERMISSION_DENIED" in err_str:
+                    break
+                break
+
+        if raw_response_text:
+            break
 
     if last_exception is not None and not raw_response_text:
         exc_str = str(last_exception)
         if "API_KEY_INVALID" in exc_str or ("400" in exc_str and "key" in exc_str.lower()):
             error_msg = "Invalid Gemini API Key. Please verify your key at https://aistudio.google.com/app/apikey"
         elif "RESOURCE_EXHAUSTED" in exc_str or "429" in exc_str:
-            error_msg = "Gemini API rate limit exceeded or quota exhausted. Please wait 60 seconds and try again."
+            error_msg = (
+                f"Google Gemini Quota Exhausted: {exc_str}\n\n"
+                "👉 How to fix:\n"
+                "1. If this key was made in Google Cloud Console, free quota is 0. Create a free key directly at: https://aistudio.google.com/app/apikey\n"
+                "2. In Sidebar, select 'gemini-1.5-flash-8b' (uses minimal tokens and has separate quota)."
+            )
         elif "PERMISSION_DENIED" in exc_str:
             error_msg = "Permission denied. Ensure the Generative Language API is enabled for this key."
         elif "MODEL_NOT_FOUND" in exc_str or "404" in exc_str or "not found" in exc_str.lower():
             error_msg = (
-                "Your Gemini API key could not access the model. This happens if the key was created in Google Cloud "
-                "without 'Generative Language API' enabled. Please create a free key directly at: "
+                "Your Gemini API key could not access the model. Create a free key directly at: "
                 "https://aistudio.google.com/app/apikey and paste it into the Sidebar."
             )
         else:
@@ -447,7 +389,7 @@ def generate_story(
             "metadata": {},
         }
 
-    # 6. Parse response
+    # 7. Parse response
     final_title, story_body = _parse_story_response(raw_response_text, user_title=title)
     words = story_body.split()
     word_count = len(words)
