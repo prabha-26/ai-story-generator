@@ -2,7 +2,7 @@
 story_generator.py
 ==================
 Core backend module for the AI Story Generator.
-Token-optimized with strict output limits and lean prompt engineering.
+Token-optimized with strict output limits, multi-SDK fallback, and robust error handling.
 """
 
 import os
@@ -76,7 +76,7 @@ DUMMY_KEYS = {
 
 
 def get_api_key(override_key: Optional[str] = None) -> Optional[str]:
-    """Retrieve Gemini API key with priority override, secrets, and env."""
+    """Retrieve Gemini API key with priority: override, Streamlit secrets, or .env."""
     if override_key and override_key.strip():
         key = override_key.strip()
         if key not in DUMMY_KEYS:
@@ -158,7 +158,7 @@ def build_user_prompt(
 
 
 def _parse_story_response(raw_text: str, user_title: Optional[str] = None) -> Tuple[str, str]:
-    """Extract clean title and narrative body."""
+    """Extract clean title and narrative body with fallback safeguards."""
     text = raw_text.strip()
     extracted_title = ""
 
@@ -177,7 +177,49 @@ def _parse_story_response(raw_text: str, user_title: Optional[str] = None) -> Tu
             extracted_title = "Untitled Masterpiece"
 
     text = re.sub(r"^(?:Title:\s*|#+\s*)[^\n]+\n+", "", text, flags=re.IGNORECASE).strip()
-    return extracted_title, text
+
+    if not text:
+        text = raw_text.strip()
+
+    return extracted_title or "Untitled Masterpiece", text
+
+
+def generate_story_with_legacy_genai(
+    api_key: str,
+    system_prompt: str,
+    user_prompt: str,
+    model_name: str,
+    max_output_tokens: int = 950,
+) -> str:
+    """Primary invocation using the standard google.generativeai SDK."""
+    import google.generativeai as genai
+
+    genai.configure(api_key=api_key)
+    clean_model = model_name.replace("models/", "")
+
+    model = genai.GenerativeModel(
+        model_name=clean_model,
+        system_instruction=system_prompt,
+        generation_config={
+            "temperature": 0.85,
+            "top_p": 0.95,
+            "max_output_tokens": max_output_tokens,
+        },
+    )
+
+    response = model.generate_content(user_prompt)
+
+    if hasattr(response, "text") and response.text:
+        return response.text
+
+    if hasattr(response, "candidates") and response.candidates:
+        first_cand = response.candidates[0]
+        if hasattr(first_cand, "content") and hasattr(first_cand.content, "parts"):
+            parts = [p.text for p in first_cand.content.parts if hasattr(p, "text") and p.text]
+            if parts:
+                return "\n".join(parts)
+
+    raise ValueError("Gemini API returned an empty response. Please try again.")
 
 
 def generate_story_with_google_genai(
@@ -187,7 +229,7 @@ def generate_story_with_google_genai(
     model_name: str,
     max_output_tokens: int = 950,
 ) -> str:
-    """Invoke Gemini using modern google-genai SDK with strict token budget."""
+    """Secondary invocation using modern google-genai SDK."""
     from google import genai
     from google.genai import types
 
@@ -213,39 +255,10 @@ def generate_story_with_google_genai(
     return response.text
 
 
-def generate_story_with_legacy_genai(
-    api_key: str,
-    system_prompt: str,
-    user_prompt: str,
-    model_name: str,
-    max_output_tokens: int = 950,
-) -> str:
-    """Fallback invocation using google.generativeai SDK with strict token budget."""
-    import google.generativeai as genai
-
-    genai.configure(api_key=api_key)
-
-    model = genai.GenerativeModel(
-        model_name=model_name,
-        system_instruction=system_prompt,
-        generation_config={
-            "temperature": 0.85,
-            "top_p": 0.95,
-            "max_output_tokens": max_output_tokens,
-        },
-    )
-
-    response = model.generate_content(user_prompt)
-    if not response or not response.text:
-        raise ValueError("Gemini API returned an empty response. Please try again.")
-
-    return response.text
-
-
 def _get_dynamic_model_candidates(preferred_model: str) -> list:
     """Build a clean, token-efficient model fallback list."""
     candidates = [preferred_model]
-    for m in ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash"]:
+    for m in ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash", "gemini-pro"]:
         if m not in candidates:
             candidates.append(m)
     return candidates
@@ -264,7 +277,6 @@ def generate_story(
     model_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Main entry point for generating a story with token controls."""
-    # 1. Validate inputs
     is_valid, validation_err = validate_inputs(topic, genre, mood, audience, length_choice)
     if not is_valid:
         return {
@@ -277,7 +289,6 @@ def generate_story(
             "metadata": {},
         }
 
-    # 2. Validate API key
     active_key = get_api_key(api_key)
     if not active_key:
         return {
@@ -293,15 +304,12 @@ def generate_story(
             "metadata": {},
         }
 
-    # 3. Model selection & candidate fallback list
     chosen_model = model_name or DEFAULT_MODEL
     model_candidates = _get_dynamic_model_candidates(chosen_model)
 
-    # 4. Token limit calculation
     length_info = LENGTH_OPTIONS.get(length_choice, LENGTH_OPTIONS["Medium (500–700 words)"])
     max_tokens_budget = length_info.get("max_tokens", 950)
 
-    # 5. Prompt assembly
     system_prompt = build_system_prompt()
     user_prompt = build_user_prompt(
         topic=topic,
@@ -314,7 +322,6 @@ def generate_story(
         title=title,
     )
 
-    # 6. Call Gemini API
     raw_response_text = ""
     sdk_used = "unknown"
     successful_model = chosen_model
@@ -322,21 +329,24 @@ def generate_story(
 
     def _call_gemini_single(model_to_use: str) -> Tuple[str, str]:
         try:
-            return generate_story_with_google_genai(
-                api_key=active_key,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                model_name=model_to_use,
-                max_output_tokens=max_tokens_budget,
-            ), "google-genai"
-        except (ImportError, ModuleNotFoundError):
             return generate_story_with_legacy_genai(
                 api_key=active_key,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 model_name=model_to_use,
                 max_output_tokens=max_tokens_budget,
-            ), "google-generativeai"
+            ), "google.generativeai"
+        except Exception as e_legacy:
+            try:
+                return generate_story_with_google_genai(
+                    api_key=active_key,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    model_name=model_to_use,
+                    max_output_tokens=max_tokens_budget,
+                ), "google-genai"
+            except Exception:
+                raise e_legacy
 
     for candidate in model_candidates:
         for attempt in range(2):
@@ -364,10 +374,11 @@ def generate_story(
             error_msg = "Invalid Gemini API Key. Please verify your key at https://aistudio.google.com/app/apikey"
         elif "RESOURCE_EXHAUSTED" in exc_str or "429" in exc_str:
             error_msg = (
-                f"Google Gemini Quota Exhausted: {exc_str}\n\n"
+                f"Google Gemini Quota Exhausted / Rate Limit: {exc_str}\n\n"
                 "👉 How to fix:\n"
-                "1. If this key was made in Google Cloud Console, free quota is 0. Create a free key directly at: https://aistudio.google.com/app/apikey\n"
-                "2. In Sidebar, select 'gemini-1.5-flash-8b' (uses minimal tokens and has separate quota)."
+                "1. If this key was made in Google Cloud Console, free quota is set to 0. Create a free key directly at: https://aistudio.google.com/app/apikey\n"
+                "2. Try selecting 'gemini-1.5-flash-8b' or 'gemini-2.0-flash' in the Sidebar model dropdown.\n"
+                "3. Or paste a fresh key into Sidebar > ⚙️ API Configuration."
             )
         elif "PERMISSION_DENIED" in exc_str:
             error_msg = "Permission denied. Ensure the Generative Language API is enabled for this key."
@@ -389,7 +400,6 @@ def generate_story(
             "metadata": {},
         }
 
-    # 7. Parse response
     final_title, story_body = _parse_story_response(raw_response_text, user_title=title)
     words = story_body.split()
     word_count = len(words)
