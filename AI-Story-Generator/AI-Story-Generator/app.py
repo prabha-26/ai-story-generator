@@ -319,6 +319,12 @@ with st.sidebar:
     st.markdown("---")
 
     # F. Action Buttons
+        selected_model = st.selectbox(
+            "Gemini Model",
+            options=["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"],
+            index=0,
+            help="Choose your preferred Gemini model version.",
+        )
     col_btn1, col_btn2 = st.columns([1.5, 1])
     with col_btn1:
         generate_clicked = st.button(
