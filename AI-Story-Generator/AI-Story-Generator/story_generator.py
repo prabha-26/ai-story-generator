@@ -2,8 +2,8 @@
 story_generator.py
 ==================
 Core backend module for the AI Story Generator.
-Token-optimized with strict output limits, transparent error reporting,
-and dual SDK resilience.
+Token-optimized with strict output limits, clean model targeting,
+and transparent error reporting.
 """
 
 import os
@@ -197,39 +197,12 @@ def _invoke_gemini_api(
     max_tokens: int,
 ) -> Tuple[str, str]:
     """
-    Dual-engine invocation trying google.generativeai first, then google-genai,
-    with clear exception tracing.
+    Direct invocation of Gemini API with SDK fallback.
     """
     clean_model = model_name.replace("models/", "")
     full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
-    errors = []
 
-    # Attempt 1: google.generativeai (standard, reliable)
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(clean_model)
-        res = model.generate_content(
-            full_prompt,
-            generation_config={
-                "temperature": 0.85,
-                "top_p": 0.95,
-                "max_output_tokens": max_tokens,
-            },
-        )
-        if hasattr(res, "text") and res.text:
-            return res.text, "google.generativeai"
-
-        if hasattr(res, "candidates") and res.candidates:
-            cand = res.candidates[0]
-            if hasattr(cand, "content") and hasattr(cand.content, "parts"):
-                parts = [p.text for p in cand.content.parts if hasattr(p, "text") and p.text]
-                if parts:
-                    return "\n".join(parts), "google.generativeai"
-    except Exception as e1:
-        errors.append(f"google.generativeai [{type(e1).__name__}]: {e1}")
-
-    # Attempt 2: modern google-genai
+    # Engine 1: google-genai (new official SDK)
     try:
         from google import genai
         from google.genai import types
@@ -247,11 +220,35 @@ def _invoke_gemini_api(
         )
         if hasattr(res, "text") and res.text:
             return res.text, "google-genai"
-    except Exception as e2:
-        errors.append(f"google-genai [{type(e2).__name__}]: {e2}")
+    except Exception as e_genai:
+        # Engine 2: google.generativeai (fallback)
+        try:
+            import google.generativeai as legacy_genai
+            legacy_genai.configure(api_key=api_key)
+            model = legacy_genai.GenerativeModel(clean_model)
+            res = model.generate_content(
+                full_prompt,
+                generation_config={
+                    "temperature": 0.85,
+                    "top_p": 0.95,
+                    "max_output_tokens": max_tokens,
+                },
+            )
+            if hasattr(res, "text") and res.text:
+                return res.text, "google.generativeai"
 
-    error_summary = " | ".join(errors) if errors else "Empty response returned by Gemini API"
-    raise RuntimeError(error_summary)
+            if hasattr(res, "candidates") and res.candidates:
+                cand = res.candidates[0]
+                if hasattr(cand, "content") and hasattr(cand.content, "parts"):
+                    parts = [p.text for p in cand.content.parts if hasattr(p, "text") and p.text]
+                    if parts:
+                        return "\n".join(parts), "google.generativeai"
+        except Exception:
+            raise e_genai
+
+        raise e_genai
+
+    raise RuntimeError("Empty response received from Gemini API.")
 
 
 def generate_story(
@@ -266,7 +263,7 @@ def generate_story(
     api_key: Optional[str] = None,
     model_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Main entry point for generating a story with token controls."""
+    """Main entry point for generating a story."""
     # 1. Validate inputs
     is_valid, validation_err = validate_inputs(topic, genre, mood, audience, length_choice)
     if not is_valid:
@@ -296,12 +293,8 @@ def generate_story(
             "metadata": {},
         }
 
-    # 3. Model selection & candidate fallback list
-    chosen_model = model_name or DEFAULT_MODEL
-    candidates = [chosen_model]
-    for fallback_m in ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash", "gemini-pro"]:
-        if fallback_m not in candidates:
-            candidates.append(fallback_m)
+    # 3. Model selection
+    target_model = model_name or DEFAULT_MODEL
 
     # 4. Token limit calculation
     length_info = LENGTH_OPTIONS.get(length_choice, LENGTH_OPTIONS["Medium (500–700 words)"])
@@ -320,42 +313,41 @@ def generate_story(
         title=title,
     )
 
-    # 6. Call Gemini API
+    # 6. Execute Generation
     raw_response_text = ""
     sdk_used = "unknown"
-    successful_model = chosen_model
-    last_exception = None
+    error_details = ""
 
-    for candidate in candidates:
-        for attempt in range(2):
+    # Attempt the target model
+    try:
+        raw_response_text, sdk_used = _invoke_gemini_api(
+            api_key=active_key,
+            model_name=target_model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=max_tokens_budget,
+        )
+    except Exception as exc:
+        error_details = str(exc)
+        # If rate limited (429), try one quick retry with backoff
+        if "429" in error_details or "RESOURCE_EXHAUSTED" in error_details:
+            time.sleep(3)
             try:
                 raw_response_text, sdk_used = _invoke_gemini_api(
                     api_key=active_key,
-                    model_name=candidate,
+                    model_name=target_model,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     max_tokens=max_tokens_budget,
                 )
-                successful_model = candidate
-                last_exception = None
-                break
-            except Exception as exc:
-                last_exception = exc
-                err_str = str(exc)
-                if ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str) and attempt == 0:
-                    time.sleep(2)
-                    continue
-                if "API_KEY_INVALID" in err_str or "PERMISSION_DENIED" in err_str:
-                    break
-                break
+                error_details = ""
+            except Exception as retry_exc:
+                error_details = str(retry_exc)
 
-        if raw_response_text:
-            break
-
-    if last_exception is not None and not raw_response_text:
+    if not raw_response_text:
         return {
             "success": False,
-            "error": f"API Error: {str(last_exception)}",
+            "error": f"Gemini Error on '{target_model}': {error_details}",
             "story": "",
             "title": "",
             "word_count": 0,
@@ -383,7 +375,7 @@ def generate_story(
             "length_choice": length_choice,
             "characters": characters.strip() if characters else "N/A",
             "setting": setting.strip() if setting else "N/A",
-            "model": successful_model,
+            "model": target_model,
             "sdk": sdk_used,
         },
     }
