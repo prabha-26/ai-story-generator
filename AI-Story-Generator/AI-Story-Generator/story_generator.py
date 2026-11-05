@@ -64,8 +64,8 @@ LENGTH_OPTIONS = {
     },
 }
 
-# Default model fallback
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+# Default to current active Gemini model
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # Known placeholder values to ignore
 DUMMY_KEYS = {
@@ -196,13 +196,11 @@ def _invoke_gemini_api(
     user_prompt: str,
     max_tokens: int,
 ) -> Tuple[str, str]:
-    """
-    Direct invocation of Gemini API with SDK fallback.
-    """
+    """Direct invocation of Gemini API using official Google GenAI SDK."""
     clean_model = model_name.replace("models/", "")
     full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
 
-    # Engine 1: google-genai (new official SDK)
+    # Engine 1: google-genai (current official SDK)
     try:
         from google import genai
         from google.genai import types
@@ -264,7 +262,6 @@ def generate_story(
     model_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Main entry point for generating a story."""
-    # 1. Validate inputs
     is_valid, validation_err = validate_inputs(topic, genre, mood, audience, length_choice)
     if not is_valid:
         return {
@@ -277,7 +274,6 @@ def generate_story(
             "metadata": {},
         }
 
-    # 2. Validate API key
     active_key = get_api_key(api_key)
     if not active_key:
         return {
@@ -293,14 +289,10 @@ def generate_story(
             "metadata": {},
         }
 
-    # 3. Model selection
     target_model = model_name or DEFAULT_MODEL
-
-    # 4. Token limit calculation
     length_info = LENGTH_OPTIONS.get(length_choice, LENGTH_OPTIONS["Medium (500–700 words)"])
     max_tokens_budget = length_info.get("max_tokens", 950)
 
-    # 5. Prompt assembly
     system_prompt = build_system_prompt()
     user_prompt = build_user_prompt(
         topic=topic,
@@ -313,12 +305,10 @@ def generate_story(
         title=title,
     )
 
-    # 6. Execute Generation
     raw_response_text = ""
     sdk_used = "unknown"
     error_details = ""
 
-    # Attempt the target model
     try:
         raw_response_text, sdk_used = _invoke_gemini_api(
             api_key=active_key,
@@ -329,7 +319,6 @@ def generate_story(
         )
     except Exception as exc:
         error_details = str(exc)
-        # If rate limited (429), try one quick retry with backoff
         if "429" in error_details or "RESOURCE_EXHAUSTED" in error_details:
             time.sleep(3)
             try:
@@ -355,7 +344,6 @@ def generate_story(
             "metadata": {},
         }
 
-    # 7. Parse response
     final_title, story_body = _parse_story_response(raw_response_text, user_title=title)
     words = story_body.split()
     word_count = len(words)
