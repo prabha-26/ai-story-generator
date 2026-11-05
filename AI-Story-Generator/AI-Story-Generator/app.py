@@ -41,13 +41,11 @@ CUSTOM_CSS = """
     --text-secondary: #8B949E;
 }
 
-/* Overall page background */
 .stApp {
     background: radial-gradient(circle at 15% 15%, #181926 0%, #0e1117 100%);
     color: var(--text-primary);
 }
 
-/* Gradient Titles */
 .gradient-title {
     font-size: 2.6rem;
     font-weight: 800;
@@ -64,7 +62,6 @@ CUSTOM_CSS = """
     margin-bottom: 1.5rem;
 }
 
-/* Custom styled badge pill */
 .badge-container {
     display: flex;
     flex-wrap: wrap;
@@ -93,7 +90,6 @@ CUSTOM_CSS = """
     color: #c9d8ff;
 }
 
-/* Story Reading Card */
 .story-container {
     background: var(--card-bg);
     border: 1px solid var(--border-subtle);
@@ -118,7 +114,6 @@ CUSTOM_CSS = """
     padding-bottom: 0.6rem;
 }
 
-/* Feature cards for landing page */
 .feature-card {
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid rgba(255, 255, 255, 0.08);
@@ -142,7 +137,6 @@ CUSTOM_CSS = """
     color: #8B949E;
 }
 
-/* Footer styling */
 .footer-container {
     margin-top: 3.5rem;
     padding-top: 1.5rem;
@@ -317,7 +311,7 @@ with st.sidebar:
 
         selected_model = st.selectbox(
             "Gemini Model",
-            options=["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"],
+            options=["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash", "gemini-1.5-pro"],
             index=0,
             help="Choose your preferred Gemini model version.",
         )
@@ -349,35 +343,39 @@ def execute_generation():
 
     active_api_key = st.session_state.sidebar_api_key.strip() or get_api_key()
     if not active_api_key:
-        st.error(
+        st.session_state.api_error = (
             "🔑 **Gemini API Key Required**: Please provide your key in `.env` "
-            "(`GEMINI_API_KEY=your_key`) or paste it under **Sidebar > ⚙️ API Configuration**."
+            "or paste it under **Sidebar > ⚙️ API Configuration**."
         )
         return
 
     if not user_topic or not user_topic.strip():
-        st.warning("⚠️ Please provide a story topic or premise to begin!")
+        st.session_state.api_error = "⚠️ Please provide a story topic or premise to begin!"
         return
 
-    with st.spinner("🔮 Summoning the muse... Crafting narrative arc and prose with Gemini..."):
-        result = generate_story(
-            topic=user_topic,
-            genre=user_genre,
-            characters=user_characters,
-            setting=user_setting,
-            mood=user_mood,
-            audience=user_audience,
-            length_choice=user_length,
-            title=user_title,
-            api_key=active_api_key,
-            model_name=selected_model,
-        )
+    try:
+        with st.spinner("🔮 Summoning the muse... Crafting narrative arc and prose with Gemini..."):
+            result = generate_story(
+                topic=user_topic,
+                genre=user_genre,
+                characters=user_characters,
+                setting=user_setting,
+                mood=user_mood,
+                audience=user_audience,
+                length_choice=user_length,
+                title=user_title,
+                api_key=active_api_key,
+                model_name=selected_model,
+            )
 
-    if result["success"]:
-        st.session_state.story_data = result
-        st.session_state.api_error = None
-    else:
-        st.session_state.api_error = result["error"]
+        if result and result.get("success"):
+            st.session_state.story_data = result
+            st.session_state.api_error = None
+        else:
+            err = result.get("error") if result else "Unknown error occurred."
+            st.session_state.api_error = err
+    except Exception as exc:
+        st.session_state.api_error = f"Application Error: {str(exc)}"
 
 
 if generate_clicked:
@@ -393,16 +391,13 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Display error alerts if any occurred
 if st.session_state.api_error:
     st.error(f"❌ **Error Encountered:** {st.session_state.api_error}")
 
-# When story exists, render the reading area
 if st.session_state.story_data:
     data = st.session_state.story_data
     meta = data["metadata"]
 
-    # Action Toolbar
     st.markdown("### 📖 Generated Story")
 
     col_tb1, col_tb2, col_tb3, col_tb4 = st.columns([1.2, 1.3, 1.2, 2.3])
@@ -413,7 +408,6 @@ if st.session_state.story_data:
         st.button("✨ Another Story", on_click=clear_inputs, use_container_width=True, help="Start a new concept")
 
     with col_tb3:
-        # Prepare full story text file for download
         download_payload = f"""{data['title']}
 ========================================
 Genre: {meta.get('genre')} | Mood: {meta.get('mood')}
@@ -431,7 +425,6 @@ Model: {meta.get('model')}
             use_container_width=True,
         )
 
-    # Badges row
     st.markdown(
         f"""
         <div class="badge-container">
@@ -446,7 +439,6 @@ Model: {meta.get('model')}
         unsafe_allow_html=True,
     )
 
-    # Formatted Reading Card
     st.markdown(
         f"""
         <div class="story-container">
@@ -459,13 +451,11 @@ Model: {meta.get('model')}
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Copy Story Helper
     with st.expander("📋 Copy Story Text", expanded=False):
         st.code(download_payload, language="markdown")
         st.caption("Click the copy icon in the upper right corner of the box above to copy instantly.")
 
 else:
-    # Landing Page with quick inspiration and guide
     st.markdown("---")
     st.markdown("#### 🌟 Welcome to the Creative Studio")
     st.write(
@@ -523,7 +513,6 @@ else:
             on_click=load_fantasy_prompt,
             use_container_width=True,
         )
-
 
 # -----------------------------------------------------------------------------
 # 6. Modern Footer
